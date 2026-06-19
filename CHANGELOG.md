@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4 - 2026-06-19
+
+### Fixed
+
+- Let preview doctor perform authenticated, read-only GitHub Packages checks
+  with the workflow token and retry registry reads after preview publish.
+
 ## 0.1.3 - 2026-06-19
 
 ### Added

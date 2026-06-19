@@ -172,7 +172,7 @@ export async function runPreviewDoctor(options = {}) {
     addCheck("preview-dist-tag", "mocked", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, expectedVersion: plan.preview.version });
     addCheck("preview-install", "mocked", { target: plan.install.target });
   } else {
-    verifyPreviewNpm(plan, addCheck, options.registry);
+    await verifyPreviewNpm(plan, addCheck, options.registry);
   }
 
   const failed = checks.filter((check) => check.status === "fail");
@@ -643,26 +643,83 @@ async function copyPackFiles(packageDir, stageDir, files) {
   }
 }
 
-function verifyPreviewNpm(plan, addCheck, registry = "https://npm.pkg.github.com") {
-  const versionResult = spawnSync("npm", ["view", plan.preview.packageSpec, "version", "--registry", registry], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  if (versionResult.status === 0 && versionResult.stdout.trim() === plan.preview.version) {
-    addCheck("preview-version", "pass", { spec: plan.preview.packageSpec });
-  } else {
-    addCheck("preview-version", "fail", { spec: plan.preview.packageSpec, output: (versionResult.stderr || versionResult.stdout).slice(0, 500) });
+async function verifyPreviewNpm(plan, addCheck, registry = "https://npm.pkg.github.com") {
+  const auth = await previewNpmAuth(registry, plan.preview.mirrorPackageName);
+  try {
+    const versionResult = npmViewWithRetry([plan.preview.packageSpec, "version"], plan.preview.version, registry, auth.env);
+    if (versionResult.status === 0 && versionResult.stdout.trim() === plan.preview.version) {
+      addCheck("preview-version", "pass", { spec: plan.preview.packageSpec });
+    } else {
+      addCheck("preview-version", "fail", { spec: plan.preview.packageSpec, output: npmOutput(versionResult) });
+    }
+
+    const tagResult = npmViewWithRetry([plan.preview.mirrorPackageName, `dist-tags.${plan.preview.distTag}`], plan.preview.version, registry, auth.env);
+    if (tagResult.status === 0 && tagResult.stdout.trim() === plan.preview.version) {
+      addCheck("preview-dist-tag", "pass", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, version: plan.preview.version });
+    } else {
+      addCheck("preview-dist-tag", "fail", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, output: npmOutput(tagResult) });
+    }
+  } finally {
+    await auth.cleanup();
+  }
+}
+
+function npmViewWithRetry(args, expectedStdout, registry, env) {
+  const attempts = Number(process.env.ASYNC_RELEASE_PREVIEW_DOCTOR_ATTEMPTS ?? "6");
+  const delayMs = Number(process.env.ASYNC_RELEASE_PREVIEW_DOCTOR_RETRY_MS ?? "1000");
+  let result;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    result = spawnSync("npm", ["view", ...args, "--registry", registry], {
+      encoding: "utf8",
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    if (result.status === 0 && result.stdout.trim() === expectedStdout) return result;
+    if (attempt < attempts && delayMs > 0) sleep(delayMs);
+  }
+  return result;
+}
+
+async function previewNpmAuth(registry, packageName) {
+  const token = process.env.NODE_AUTH_TOKEN || process.env.GITHUB_TOKEN;
+  if (!token || !isGitHubPackagesRegistry(registry)) {
+    return { env: {}, cleanup: async () => {} };
   }
 
-  const tagResult = spawnSync("npm", ["view", plan.preview.mirrorPackageName, `dist-tags.${plan.preview.distTag}`, "--registry", registry], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  if (tagResult.status === 0 && tagResult.stdout.trim() === plan.preview.version) {
-    addCheck("preview-dist-tag", "pass", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, version: plan.preview.version });
-  } else {
-    addCheck("preview-dist-tag", "fail", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, output: (tagResult.stderr || tagResult.stdout).slice(0, 500) });
+  const dir = await mkdtemp(join(tmpdir(), "async-release-npmrc-"));
+  const url = new URL(registry);
+  const scope = packageName.startsWith("@") ? packageName.split("/")[0] : undefined;
+  const lines = [
+    scope ? `${scope}:registry=${registry}` : undefined,
+    `//${url.host}/:_authToken=${token}`
+  ].filter(Boolean);
+  const userconfig = join(dir, ".npmrc");
+  await writeFile(userconfig, `${lines.join("\n")}\n`, "utf8");
+  return {
+    env: {
+      NPM_CONFIG_USERCONFIG: userconfig,
+      NODE_AUTH_TOKEN: token
+    },
+    cleanup: async () => {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+function isGitHubPackagesRegistry(registry) {
+  try {
+    return new URL(registry).host === "npm.pkg.github.com";
+  } catch {
+    return false;
   }
+}
+
+function npmOutput(result) {
+  return (result.stderr || result.stdout || "").slice(0, 500);
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function normalizeNamespace(namespace) {

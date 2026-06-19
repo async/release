@@ -278,6 +278,46 @@ test("preview doctor live mode verifies immutable version and dist-tag with npm 
   }
 });
 
+test("preview doctor live mode authenticates GitHub Packages reads with workflow token", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "async-release-preview-doctor-auth-"));
+  const originalPath = process.env.PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  try {
+    writeJson(join(dir, "package.json"), { name: "@async/example", version: "1.2.3" });
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const callsPath = join(dir, "npm-calls.jsonl");
+    writeFileSync(join(binDir, "npm"), fakePreviewNpm(callsPath, "0.0.0-pr.12.sha.abc123"), "utf8");
+    chmodSync(join(binDir, "npm"), 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.GITHUB_TOKEN = "fake-github-token";
+
+    const result = await runPreviewDoctor({
+      cwd: dir,
+      mode: "pr",
+      namespace: "async",
+      network: "live",
+      registry: "https://npm.pkg.github.com",
+      prNumber: 12,
+      headSha: "abc123",
+      sourceSha: "base123"
+    });
+
+    assert.equal(result.status, "pass");
+    const calls = readFileSync(callsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(calls.every((call) => call.userconfig.includes("async-release-npmrc-")));
+    assert.ok(calls.every((call) => call.nodeAuthToken === "fake-github-token"));
+  } finally {
+    process.env.PATH = originalPath;
+    if (originalToken === undefined) {
+      delete process.env.GITHUB_TOKEN;
+    } else {
+      process.env.GITHUB_TOKEN = originalToken;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("preview plan records explicit skip evidence for fork PR callers", async () => {
   const dir = mkdtempSync(join(tmpdir(), "async-release-preview-skip-"));
   try {
@@ -493,7 +533,7 @@ function fakePreviewNpm(callsPath, version) {
 import { appendFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
-appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args }) + "\\n");
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args, userconfig: process.env.NPM_CONFIG_USERCONFIG || "", nodeAuthToken: process.env.NODE_AUTH_TOKEN || "" }) + "\\n");
 
 if (args[0] === "view" && args[2] === "version") {
   process.stdout.write(${JSON.stringify(version)} + "\\n");
