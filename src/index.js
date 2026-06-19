@@ -490,33 +490,46 @@ function verifyGitHubRelease(context, repository, addCheck) {
 }
 
 function createGitHubReleaseClient({ cwd, repository }) {
+  const releaseIds = new Map();
   return {
     async listReleases() {
-      const list = runGh(cwd, ["release", "list", "--repo", repository, "--limit", "1000", "--json", "tagName"]);
-      const releases = JSON.parse(list.stdout);
-      const rows = [];
-      for (const release of releases) {
-        const tagName = release.tagName;
-        if (!isSemverTag(tagName)) {
-          rows.push({ tagName, body: "" });
-          continue;
-        }
-        const view = runGh(cwd, ["release", "view", tagName, "--repo", repository, "--json", "tagName,body"]);
-        rows.push(JSON.parse(view.stdout));
+      const list = runGh(cwd, [
+        "api",
+        `repos/${repository}/releases?per_page=100`,
+        "--paginate",
+        "--jq",
+        ".[] | {id: .id, tagName: .tag_name, body: (.body // \"\")}"
+      ]);
+      const rows = parseJsonLines(list.stdout);
+      for (const release of rows) {
+        releaseIds.set(release.tagName, release.id);
       }
       return rows;
     },
     async updateReleaseBody(tagName, body) {
+      const releaseId = releaseIds.get(tagName) ?? releaseIdForTag(cwd, repository, tagName);
       const dir = await mkdtemp(join(tmpdir(), "async-release-notes-"));
       try {
-        const notesPath = join(dir, "notes.md");
-        await writeFile(notesPath, body, "utf8");
-        runGh(cwd, ["release", "edit", tagName, "--repo", repository, "--notes-file", notesPath]);
+        const inputPath = join(dir, "release.json");
+        await writeFile(inputPath, `${JSON.stringify({ body })}\n`, "utf8");
+        runGh(cwd, ["api", "--method", "PATCH", `repos/${repository}/releases/${releaseId}`, "--input", inputPath]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
     }
   };
+}
+
+function releaseIdForTag(cwd, repository, tagName) {
+  const view = runGh(cwd, ["api", `repos/${repository}/releases/tags/${tagName}`, "--jq", "{id: .id}"]);
+  return JSON.parse(view.stdout).id;
+}
+
+function parseJsonLines(stdout) {
+  return stdout
+    .split(/\r?\n/u)
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line));
 }
 
 function runGh(cwd, args) {

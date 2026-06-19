@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 - 2026-06-19
+
+### Fixed
+
+- Switch release-description sync to GitHub's REST releases API for listing
+  and updating release bodies, avoiding `gh release list` GraphQL timeouts.
+
 ## 0.1.1 - 2026-06-19
 
 ### Added

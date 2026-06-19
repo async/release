@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -166,6 +166,37 @@ test("release description sync fails when a semver release lacks a changelog sec
   }
 });
 
+test("release description sync uses REST releases API for list and update", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "async-release-rest-sync-"));
+  const originalPath = process.env.PATH;
+  try {
+    writeJson(join(dir, "package.json"), {
+      name: "@async/release",
+      version: "0.1.0",
+      repository: { type: "git", url: "git+https://github.com/async/release.git" }
+    });
+    writeFileSync(join(dir, "CHANGELOG.md"), "# Changelog\n\n## 0.1.0 - 2026-06-19\n\n- Initial release.\n", "utf8");
+    const binDir = join(dir, "bin");
+    const callsPath = join(dir, "gh-calls.jsonl");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(binDir, "gh"), fakeGhScript(callsPath), "utf8");
+    chmodSync(join(binDir, "gh"), 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+
+    const result = await syncReleaseDescriptions({ cwd: dir });
+
+    assert.deepEqual(result.updated, [{ tagName: "v0.1.0" }]);
+    assert.deepEqual(result.skipped, [{ tagName: "nightly", reason: "non-semver" }]);
+    const calls = readFileSync(callsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(calls[0].args.slice(0, 4), ["api", "repos/async/release/releases?per_page=100", "--paginate", "--jq"]);
+    assert.deepEqual(calls[1].args.slice(0, 4), ["api", "--method", "PATCH", "repos/async/release/releases/123"]);
+    assert.equal(calls[1].body, releaseBody("0.1.0", "2026-06-19", "- Initial release."));
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("CLI exposes JSON command output", () => {
   const dir = mkdtempSync(join(tmpdir(), "async-release-cli-"));
   try {
@@ -184,6 +215,31 @@ test("CLI exposes JSON command output", () => {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function fakeGhScript(callsPath) {
+  return `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+
+const callsPath = ${JSON.stringify(callsPath)};
+const args = process.argv.slice(2);
+let body;
+const inputIndex = args.indexOf("--input");
+if (inputIndex !== -1) {
+  body = JSON.parse(readFileSync(args[inputIndex + 1], "utf8")).body;
+}
+appendFileSync(callsPath, JSON.stringify({ args, body }) + "\\n");
+
+if (args[0] === "api" && args[1] === "repos/async/release/releases?per_page=100") {
+  process.stdout.write(JSON.stringify({ id: 123, tagName: "v0.1.0", body: "stale" }) + "\\n");
+  process.stdout.write(JSON.stringify({ id: 124, tagName: "nightly", body: "custom" }) + "\\n");
+} else if (args[0] === "api" && args[1] === "--method" && args[2] === "PATCH" && args[3] === "repos/async/release/releases/123") {
+  process.stdout.write("{}\\n");
+} else {
+  process.stderr.write("unexpected gh args: " + args.join(" ") + "\\n");
+  process.exit(1);
+}
+`;
 }
 
 function fakeGitHub(releases) {
