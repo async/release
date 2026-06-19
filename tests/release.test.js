@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { checkChangelog, inspectPackage, planRelease, renderReleaseNotes, runDoctor } from "../src/index.js";
+import { checkChangelog, inspectPackage, planRelease, renderReleaseNotes, runDoctor, syncReleaseDescriptions } from "../src/index.js";
 
 test("package plan orders publishable workspace packages by internal dependency", async () => {
   const dir = mkdtempSync(join(tmpdir(), "async-release-plan-"));
@@ -86,6 +86,86 @@ test("doctor mock mode writes bounded local evidence without network commands", 
   }
 });
 
+test("release description sync patches stale semver GitHub Release notes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "async-release-sync-"));
+  try {
+    writeJson(join(dir, "package.json"), {
+      name: "@async/release",
+      version: "0.1.0",
+      repository: { type: "git", url: "git+https://github.com/async/release.git" }
+    });
+    writeFileSync(join(dir, "CHANGELOG.md"), [
+      "# Changelog",
+      "",
+      "## 0.1.0 - 2026-06-19",
+      "",
+      "- Initial release.",
+      "",
+      "## 0.0.9 - 2026-06-18",
+      "",
+      "- Historical release.",
+      ""
+    ].join("\n"), "utf8");
+    const github = fakeGitHub([
+      { tagName: "v0.1.0", body: "stale" },
+      { tagName: "v0.0.9", body: releaseBody("0.0.9", "2026-06-18", "- Historical release.") },
+      { tagName: "nightly", body: "custom" }
+    ]);
+
+    const result = await syncReleaseDescriptions({ cwd: dir, github });
+
+    assert.deepEqual(result.updated, [{ tagName: "v0.1.0" }]);
+    assert.deepEqual(result.matching, [{ tagName: "v0.0.9" }]);
+    assert.deepEqual(result.skipped, [{ tagName: "nightly", reason: "non-semver" }]);
+    assert.equal(github.updates.get("v0.1.0"), releaseBody("0.1.0", "2026-06-19", "- Initial release."));
+    assert.match(readFileSync(join(dir, ".async/release/release-description-sync.json"), "utf8"), /"v0.1.0"/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("release description sync check reports drift without patching", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "async-release-sync-check-"));
+  try {
+    writeJson(join(dir, "package.json"), {
+      name: "@async/release",
+      version: "0.1.0",
+      repository: { type: "git", url: "git+https://github.com/async/release.git" }
+    });
+    writeFileSync(join(dir, "CHANGELOG.md"), "# Changelog\n\n## 0.1.0 - 2026-06-19\n\n- Initial release.\n", "utf8");
+    const github = fakeGitHub([{ tagName: "v0.1.0", body: "stale" }]);
+
+    await assert.rejects(
+      syncReleaseDescriptions({ cwd: dir, github, check: true }),
+      /GitHub Release descriptions do not match CHANGELOG\.md: v0\.1\.0 body differs/u
+    );
+    assert.equal(github.updates.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("release description sync fails when a semver release lacks a changelog section", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "async-release-sync-missing-changelog-"));
+  try {
+    writeJson(join(dir, "package.json"), {
+      name: "@async/release",
+      version: "0.1.0",
+      repository: { type: "git", url: "git+https://github.com/async/release.git" }
+    });
+    writeFileSync(join(dir, "CHANGELOG.md"), "# Changelog\n\n## 0.1.0 - 2026-06-19\n\n- Initial release.\n", "utf8");
+    const github = fakeGitHub([{ tagName: "v9.9.9", body: "orphan" }]);
+
+    await assert.rejects(
+      syncReleaseDescriptions({ cwd: dir, github }),
+      /v9\.9\.9 has no parseable, non-empty CHANGELOG\.md section/u
+    );
+    assert.equal(github.updates.size, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("CLI exposes JSON command output", () => {
   const dir = mkdtempSync(join(tmpdir(), "async-release-cli-"));
   try {
@@ -104,4 +184,29 @@ test("CLI exposes JSON command output", () => {
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function fakeGitHub(releases) {
+  const updates = new Map();
+  return {
+    updates,
+    async listReleases() {
+      return releases;
+    },
+    async updateReleaseBody(tagName, body) {
+      updates.set(tagName, body);
+    }
+  };
+}
+
+function releaseBody(version, date, body) {
+  return [
+    `Release notes from \`CHANGELOG.md\` for ${version} (${date}).`,
+    "",
+    body,
+    "",
+    "---",
+    `Source: \`CHANGELOG.md\` in tag \`v${version}\`.`,
+    ""
+  ].join("\n");
 }

@@ -16,12 +16,18 @@ async-release package plan --package . --json --evidence-dir .async/release
 async-release package inspect --package . --json --evidence-dir .async/release
 async-release changelog check --package . --json --evidence-dir .async/release
 async-release notes render --package . --json --evidence-dir .async/release
+async-release release sync-descriptions --package . --check --json --evidence-dir .async/release
 async-release doctor --package . --network mock --json --evidence-dir .async/release
 ```
 
 The authoritative release doctor can run with `--network live` in GitHub
 Actions. Local harnesses should use `--network mock` until the generated job is
 executing inside its real release environment.
+
+`release sync-descriptions` treats `CHANGELOG.md` as the source of truth for
+semver GitHub Release bodies. `--check` reports drift without patching releases;
+without `--check`, drifted semver release descriptions are updated and
+non-semver releases are ignored.
 
 ## Package Profiles
 

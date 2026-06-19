@@ -5,7 +5,8 @@ import {
   inspectPackage,
   planRelease,
   renderReleaseNotes,
-  runDoctor
+  runDoctor,
+  syncReleaseDescriptions
 } from "./index.js";
 
 const args = process.argv.slice(2);
@@ -32,6 +33,7 @@ async function run(argv) {
   if (group === "changelog" && command === "check") return checkChangelog(options);
   if (group === "changelog" && command === "update") return changelogUpdate(options);
   if (group === "notes" && command === "render") return renderReleaseNotes(options);
+  if (group === "release" && command === "sync-descriptions") return syncReleaseDescriptions(options);
   if (group === "doctor") return runDoctor(optionsFromArgs(argv.slice(1)));
   throw new Error(usage());
 }
@@ -47,6 +49,7 @@ function optionsFromArgs(argv) {
     previousVersion: value(argv, "--previous-version", undefined),
     network: value(argv, "--network", "live"),
     repository: value(argv, "--repository", undefined),
+    check: flag(argv, "--check"),
     verifyGitHubRelease: !flag(argv, "--no-github-release")
   };
 }
@@ -68,6 +71,7 @@ function summary(result) {
   if (result.bundleSizes) return `package inspection: ${result.package.name}@${result.package.version} (${result.package.profile})\n`;
   if (result.changelog) return `changelog ok: ${result.package.name}@${result.package.version}\n`;
   if (result.body) return `release notes: ${result.path}\n`;
+  if (result.updated) return `release descriptions ${result.check ? "checked" : "synced"}: ${result.updated.length} updated, ${result.matching.length} matching, ${result.skipped.length} skipped\n`;
   if (result.checks) return `release doctor ${result.status}: ${result.package.name}@${result.package.version}\n`;
   return `${JSON.stringify(result)}\n`;
 }
@@ -80,6 +84,7 @@ function usage() {
     "  async-release changelog check --package <path> [--json]",
     "  async-release changelog update --package <path> [--json]",
     "  async-release notes render --package <path> [--json]",
+    "  async-release release sync-descriptions --package <path> [--check] [--json]",
     "  async-release doctor --package <path> [--network live|mock] [--json]"
   ].join("\n");
 }

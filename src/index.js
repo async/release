@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -186,6 +187,60 @@ export async function changelogUpdate(options = {}) {
     updated: false,
     reason: "No generated changelog section was requested."
   };
+}
+
+export async function syncReleaseDescriptions(options = {}) {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const context = await readPackageContext(cwd, options.packagePath ?? ".");
+  const repository = options.repository ?? packageRepositoryName(context.manifest) ?? process.env.GITHUB_REPOSITORY;
+  if (!repository) {
+    throw new Error("Set --repository, GITHUB_REPOSITORY, or package.json repository so release descriptions can resolve GitHub state.");
+  }
+
+  const notes = await readChangelogReleaseNotes(cwd);
+  const github = options.github ?? createGitHubReleaseClient({ cwd, repository });
+  const releases = await github.listReleases();
+  const result = {
+    schemaVersion: 1,
+    package: {
+      name: context.manifest.name,
+      version: context.manifest.version
+    },
+    repository,
+    check: options.check === true,
+    updated: [],
+    matching: [],
+    skipped: [],
+    drift: []
+  };
+
+  for (const release of releases) {
+    const tagName = String(release.tagName ?? release.tag_name ?? "");
+    if (!isSemverTag(tagName)) {
+      result.skipped.push({ tagName, reason: "non-semver" });
+      continue;
+    }
+    const note = notes.get(tagName);
+    if (!note) {
+      throw new Error(`${tagName} has no parseable, non-empty CHANGELOG.md section.`);
+    }
+    const currentBody = String(release.body ?? "");
+    if (currentBody === note.releaseBody) {
+      result.matching.push({ tagName });
+      continue;
+    }
+    result.drift.push({ tagName, reason: "body differs" });
+    if (!options.check) {
+      await github.updateReleaseBody(tagName, note.releaseBody);
+      result.updated.push({ tagName });
+    }
+  }
+
+  await writeEvidence(cwd, options.evidenceDir, "release-description-sync.json", result);
+  if (options.check && result.drift.length > 0) {
+    throw new Error(`GitHub Release descriptions do not match CHANGELOG.md: ${result.drift.map((entry) => `${entry.tagName} ${entry.reason}`).join(", ")}`);
+  }
+  return result;
 }
 
 async function discoverPublishablePackages(cwd, packagePath) {
@@ -432,6 +487,52 @@ function verifyGitHubRelease(context, repository, addCheck) {
     return;
   }
   addCheck("github-release", "fail", { repo, tagName, output: (result.stderr || result.stdout).slice(0, 500) });
+}
+
+function createGitHubReleaseClient({ cwd, repository }) {
+  return {
+    async listReleases() {
+      const list = runGh(cwd, ["release", "list", "--repo", repository, "--limit", "1000", "--json", "tagName"]);
+      const releases = JSON.parse(list.stdout);
+      const rows = [];
+      for (const release of releases) {
+        const tagName = release.tagName;
+        if (!isSemverTag(tagName)) {
+          rows.push({ tagName, body: "" });
+          continue;
+        }
+        const view = runGh(cwd, ["release", "view", tagName, "--repo", repository, "--json", "tagName,body"]);
+        rows.push(JSON.parse(view.stdout));
+      }
+      return rows;
+    },
+    async updateReleaseBody(tagName, body) {
+      const dir = await mkdtemp(join(tmpdir(), "async-release-notes-"));
+      try {
+        const notesPath = join(dir, "notes.md");
+        await writeFile(notesPath, body, "utf8");
+        runGh(cwd, ["release", "edit", tagName, "--repo", repository, "--notes-file", notesPath]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+  };
+}
+
+function runGh(cwd, args) {
+  const result = spawnSync("gh", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (result.status !== 0) {
+    throw new Error(`gh ${args.slice(0, 3).join(" ")} failed: ${(result.stderr || result.stdout).slice(0, 500)}`);
+  }
+  return result;
+}
+
+function isSemverTag(tagName) {
+  return /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tagName);
 }
 
 function renderBundleTable(rows) {
