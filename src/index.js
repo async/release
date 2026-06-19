@@ -681,7 +681,7 @@ function npmViewWithRetry(args, expectedStdout, registry, env) {
 }
 
 async function previewNpmAuth(registry, packageName) {
-  const token = process.env.NODE_AUTH_TOKEN || process.env.GITHUB_TOKEN;
+  const token = previewRegistryToken(registry);
   if (!token || !isGitHubPackagesRegistry(registry)) {
     return { env: {}, cleanup: async () => {} };
   }
@@ -712,6 +712,12 @@ function isGitHubPackagesRegistry(registry) {
   } catch {
     return false;
   }
+}
+
+function previewRegistryToken(registry) {
+  return isGitHubPackagesRegistry(registry)
+    ? process.env.GITHUB_TOKEN || process.env.NODE_AUTH_TOKEN
+    : process.env.NODE_AUTH_TOKEN || process.env.GITHUB_TOKEN;
 }
 
 function npmOutput(result) {

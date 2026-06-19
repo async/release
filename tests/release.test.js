@@ -282,6 +282,7 @@ test("preview doctor live mode authenticates GitHub Packages reads with workflow
   const dir = mkdtempSync(join(tmpdir(), "async-release-preview-doctor-auth-"));
   const originalPath = process.env.PATH;
   const originalToken = process.env.GITHUB_TOKEN;
+  const originalNodeToken = process.env.NODE_AUTH_TOKEN;
   try {
     writeJson(join(dir, "package.json"), { name: "@async/example", version: "1.2.3" });
     const binDir = join(dir, "bin");
@@ -291,6 +292,7 @@ test("preview doctor live mode authenticates GitHub Packages reads with workflow
     chmodSync(join(binDir, "npm"), 0o755);
     process.env.PATH = `${binDir}:${originalPath ?? ""}`;
     process.env.GITHUB_TOKEN = "fake-github-token";
+    process.env.NODE_AUTH_TOKEN = "wrong-node-token";
 
     const result = await runPreviewDoctor({
       cwd: dir,
@@ -313,6 +315,11 @@ test("preview doctor live mode authenticates GitHub Packages reads with workflow
       delete process.env.GITHUB_TOKEN;
     } else {
       process.env.GITHUB_TOKEN = originalToken;
+    }
+    if (originalNodeToken === undefined) {
+      delete process.env.NODE_AUTH_TOKEN;
+    } else {
+      process.env.NODE_AUTH_TOKEN = originalNodeToken;
     }
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 - 2026-06-19
+
+### Fixed
+
+- Prefer `GITHUB_TOKEN` over ambient `NODE_AUTH_TOKEN` for preview doctor
+  GitHub Packages reads.
+
 ## 0.1.4 - 2026-06-19
 
 ### Fixed
