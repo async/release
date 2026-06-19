@@ -1,0 +1,85 @@
+#!/usr/bin/env node
+import {
+  changelogUpdate,
+  checkChangelog,
+  inspectPackage,
+  planRelease,
+  renderReleaseNotes,
+  runDoctor
+} from "./index.js";
+
+const args = process.argv.slice(2);
+
+try {
+  const result = await run(args);
+  if (result !== undefined) {
+    if (flag(args, "--json")) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      process.stdout.write(summary(result));
+    }
+  }
+} catch (error) {
+  process.stderr.write(`::error::${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+}
+
+async function run(argv) {
+  const [group, command] = argv;
+  const options = optionsFromArgs(argv.slice(2));
+  if (group === "package" && command === "plan") return planRelease(options);
+  if (group === "package" && command === "inspect") return inspectPackage(options);
+  if (group === "changelog" && command === "check") return checkChangelog(options);
+  if (group === "changelog" && command === "update") return changelogUpdate(options);
+  if (group === "notes" && command === "render") return renderReleaseNotes(options);
+  if (group === "doctor") return runDoctor(optionsFromArgs(argv.slice(1)));
+  throw new Error(usage());
+}
+
+function optionsFromArgs(argv) {
+  return {
+    packagePath: value(argv, "--package", "."),
+    evidenceDir: value(argv, "--evidence-dir", ".async/release"),
+    event: value(argv, "--event", undefined),
+    releaseType: value(argv, "--release-type", undefined),
+    expectedProfile: value(argv, "--expected-profile", value(argv, "--package-profile", undefined)),
+    packageProfile: value(argv, "--package-profile", undefined),
+    previousVersion: value(argv, "--previous-version", undefined),
+    network: value(argv, "--network", "live"),
+    repository: value(argv, "--repository", undefined),
+    verifyGitHubRelease: !flag(argv, "--no-github-release")
+  };
+}
+
+function value(argv, name, fallback) {
+  const index = argv.indexOf(name);
+  if (index < 0) return fallback;
+  const found = argv[index + 1];
+  if (!found || found.startsWith("--")) throw new Error(`${name} needs a value.`);
+  return found;
+}
+
+function flag(argv, name) {
+  return argv.includes(name);
+}
+
+function summary(result) {
+  if (result.releaseType) return `release plan: ${result.releaseType} (${result.publishOrder.join(", ")})\n`;
+  if (result.bundleSizes) return `package inspection: ${result.package.name}@${result.package.version} (${result.package.profile})\n`;
+  if (result.changelog) return `changelog ok: ${result.package.name}@${result.package.version}\n`;
+  if (result.body) return `release notes: ${result.path}\n`;
+  if (result.checks) return `release doctor ${result.status}: ${result.package.name}@${result.package.version}\n`;
+  return `${JSON.stringify(result)}\n`;
+}
+
+function usage() {
+  return [
+    "Usage:",
+    "  async-release package plan --package <path> [--json] [--evidence-dir <dir>]",
+    "  async-release package inspect --package <path> [--package-profile <profile>] [--json]",
+    "  async-release changelog check --package <path> [--json]",
+    "  async-release changelog update --package <path> [--json]",
+    "  async-release notes render --package <path> [--json]",
+    "  async-release doctor --package <path> [--network live|mock] [--json]"
+  ].join("\n");
+}
