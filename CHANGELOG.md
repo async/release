@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 - 2026-06-19
+
+### Added
+
+- Add `async-release preview plan|stage|inspect|doctor` commands for
+  deterministic preview package identity, staging, install-comment, inspection,
+  and read-only doctor evidence.
+
 ## 0.1.2 - 2026-06-19
 
 ### Fixed

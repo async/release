@@ -3,9 +3,13 @@ import {
   changelogUpdate,
   checkChangelog,
   inspectPackage,
+  inspectPreview,
   planRelease,
+  planPreview,
   renderReleaseNotes,
   runDoctor,
+  runPreviewDoctor,
+  stagePreview,
   syncReleaseDescriptions
 } from "./index.js";
 
@@ -30,6 +34,10 @@ async function run(argv) {
   const options = optionsFromArgs(argv.slice(2));
   if (group === "package" && command === "plan") return planRelease(options);
   if (group === "package" && command === "inspect") return inspectPackage(options);
+  if (group === "preview" && command === "plan") return planPreview(options);
+  if (group === "preview" && command === "stage") return stagePreview(options);
+  if (group === "preview" && command === "inspect") return inspectPreview(options);
+  if (group === "preview" && command === "doctor") return runPreviewDoctor(options);
   if (group === "changelog" && command === "check") return checkChangelog(options);
   if (group === "changelog" && command === "update") return changelogUpdate(options);
   if (group === "notes" && command === "render") return renderReleaseNotes(options);
@@ -47,6 +55,16 @@ function optionsFromArgs(argv) {
     expectedProfile: value(argv, "--expected-profile", value(argv, "--package-profile", undefined)),
     packageProfile: value(argv, "--package-profile", undefined),
     previousVersion: value(argv, "--previous-version", undefined),
+    mode: value(argv, "--mode", undefined),
+    registry: value(argv, "--registry", value(argv, "--target-registry", "https://npm.pkg.github.com")),
+    namespace: value(argv, "--namespace", undefined),
+    sourceRepository: value(argv, "--source-repository", value(argv, "--repository", undefined)),
+    sourceSha: value(argv, "--source-sha", value(argv, "--sha", undefined)),
+    prNumber: value(argv, "--pr-number", undefined),
+    headSha: value(argv, "--head-sha", undefined),
+    skipReason: value(argv, "--skip-reason", undefined),
+    stageDir: value(argv, "--stage-dir", undefined),
+    comment: !flag(argv, "--no-comment") && value(argv, "--comment", "true") !== "false",
     network: value(argv, "--network", "live"),
     repository: value(argv, "--repository", undefined),
     check: flag(argv, "--check"),
@@ -68,6 +86,10 @@ function flag(argv, name) {
 
 function summary(result) {
   if (result.releaseType) return `release plan: ${result.releaseType} (${result.publishOrder.join(", ")})\n`;
+  if (result.preview && result.staging) return `preview stage: ${result.preview.packageSpec ?? "skipped"} -> ${result.staging.path}\n`;
+  if (result.preview && result.inspection) return `preview inspection: ${result.preview.packageSpec ?? "skipped"} (${result.inspection.profile})\n`;
+  if (result.preview && result.checks) return `preview doctor ${result.status}: ${result.preview.packageSpec ?? "skipped"}\n`;
+  if (result.preview) return `preview plan: ${result.preview.packageSpec ?? "skipped"} (${result.preview.distTag ?? result.skip?.reason ?? "no tag"})\n`;
   if (result.bundleSizes) return `package inspection: ${result.package.name}@${result.package.version} (${result.package.profile})\n`;
   if (result.changelog) return `changelog ok: ${result.package.name}@${result.package.version}\n`;
   if (result.body) return `release notes: ${result.path}\n`;
@@ -81,6 +103,10 @@ function usage() {
     "Usage:",
     "  async-release package plan --package <path> [--json] [--evidence-dir <dir>]",
     "  async-release package inspect --package <path> [--package-profile <profile>] [--json]",
+    "  async-release preview plan --package <path> --mode pr|main --namespace <scope> --source-sha <sha> [--pr-number <n> --head-sha <sha>] [--json]",
+    "  async-release preview stage --package <path> --mode pr|main --namespace <scope> --registry <url> [--json]",
+    "  async-release preview inspect --package <path> --mode pr|main --namespace <scope> [--json]",
+    "  async-release preview doctor --package <path> --mode pr|main --namespace <scope> --network live|mock [--json]",
     "  async-release changelog check --package <path> [--json]",
     "  async-release changelog update --package <path> [--json]",
     "  async-release notes render --package <path> [--json]",

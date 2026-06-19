@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { brotliCompressSync, gzipSync } from "node:zlib";
@@ -71,6 +71,123 @@ export async function inspectPackage(options = {}) {
     diffLinks
   };
   await writeEvidence(cwd, options.evidenceDir, "package-report.json", result);
+  return result;
+}
+
+export async function planPreview(options = {}) {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const context = await readPackageContext(cwd, options.packagePath ?? ".");
+  const plan = previewPlanFromContext(cwd, context, options);
+  await writeEvidence(cwd, options.evidenceDir, "preview-plan.json", plan);
+  if (!plan.skip.shouldSkip) {
+    await writeEvidence(cwd, options.evidenceDir, "preview-install.json", {
+      schemaVersion: 1,
+      package: plan.package,
+      preview: plan.preview,
+      install: plan.install
+    });
+  }
+  return plan;
+}
+
+export async function stagePreview(options = {}) {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const context = await readPackageContext(cwd, options.packagePath ?? ".");
+  const plan = previewPlanFromContext(cwd, context, options);
+  if (plan.skip.shouldSkip) {
+    const result = {
+      schemaVersion: 1,
+      package: plan.package,
+      preview: plan.preview,
+      skip: plan.skip,
+      staged: false,
+      reason: plan.skip.reason
+    };
+    await writeEvidence(cwd, options.evidenceDir, "preview-stage.json", result);
+    return result;
+  }
+
+  const pack = readPackFiles(context.packageDir);
+  const stageDir = resolveInside(cwd, options.stageDir ?? join(options.evidenceDir ?? DEFAULT_EVIDENCE_DIR, "preview-stage"));
+  await rm(stageDir, { recursive: true, force: true });
+  await mkdir(stageDir, { recursive: true });
+  await copyPackFiles(context.packageDir, stageDir, pack.files);
+  const stagedManifest = previewManifest(context.manifest, plan, options.registry);
+  await writeFile(join(stageDir, "package.json"), `${JSON.stringify(stagedManifest, null, 2)}\n`, "utf8");
+
+  const result = {
+    schemaVersion: 1,
+    package: plan.package,
+    preview: plan.preview,
+    staging: {
+      path: relativePath(cwd, stageDir),
+      manifestPath: relativePath(cwd, join(stageDir, "package.json")),
+      publishConfig: stagedManifest.publishConfig,
+      removedFields: ["scripts", "devDependencies"].filter((field) => context.manifest[field] !== undefined),
+      files: pack.files
+    }
+  };
+  await writeEvidence(cwd, options.evidenceDir, "preview-stage.json", result);
+  return result;
+}
+
+export async function inspectPreview(options = {}) {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const plan = await planPreview(options);
+  const report = await inspectPackage(options);
+  const result = {
+    schemaVersion: 1,
+    package: report.package,
+    preview: plan.preview,
+    skip: plan.skip,
+    inspection: {
+      profile: report.package.profile,
+      pack: report.pack,
+      bundleSizes: report.bundleSizes,
+      diffLinks: report.diffLinks,
+      evidence: {
+        packageReport: evidencePath(cwd, options.evidenceDir, "package-report.json"),
+        previewPlan: evidencePath(cwd, options.evidenceDir, "preview-plan.json")
+      }
+    }
+  };
+  await writeEvidence(cwd, options.evidenceDir, "preview-inspect.json", result);
+  return result;
+}
+
+export async function runPreviewDoctor(options = {}) {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const context = await readPackageContext(cwd, options.packagePath ?? ".");
+  const plan = previewPlanFromContext(cwd, context, options);
+  const network = options.network ?? "live";
+  const checks = [];
+  const addCheck = (name, status, details = {}) => {
+    checks.push({ name, status, ...details });
+  };
+
+  if (plan.skip.shouldSkip) {
+    addCheck("preview-skip", "skip", { reason: plan.skip.reason });
+  } else if (network === "mock") {
+    addCheck("preview-version", "mocked", { spec: plan.preview.packageSpec });
+    addCheck("preview-dist-tag", "mocked", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, expectedVersion: plan.preview.version });
+    addCheck("preview-install", "mocked", { target: plan.install.target });
+  } else {
+    verifyPreviewNpm(plan, addCheck, options.registry);
+  }
+
+  const failed = checks.filter((check) => check.status === "fail");
+  const result = {
+    schemaVersion: 1,
+    package: plan.package,
+    preview: plan.preview,
+    network,
+    status: failed.length > 0 ? "fail" : "pass",
+    checks
+  };
+  await writeEvidence(cwd, options.evidenceDir, "preview-doctor.json", result);
+  if (failed.length > 0) {
+    throw new Error(`Preview doctor failed: ${failed.map((check) => check.name).join(", ")}`);
+  }
   return result;
 }
 
@@ -419,6 +536,148 @@ function releaseDiffLinks(manifest, files, previousVersion) {
       file,
       url: `https://github.com/${repository}/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}?diff=unified#diff-${encodeURIComponent(file)}`
     }));
+}
+
+function previewPlanFromContext(cwd, context, options) {
+  const mode = options.mode ?? "pr";
+  if (mode !== "pr" && mode !== "main") {
+    throw new Error(`Unsupported preview mode ${mode}. Use pr or main.`);
+  }
+  const namespace = normalizeNamespace(options.namespace);
+  if (!namespace) {
+    throw new Error("Preview planning needs --namespace.");
+  }
+  const sourceSha = options.sourceSha ?? process.env.GITHUB_SHA;
+  const sourceRepository = options.sourceRepository ?? options.repository ?? process.env.GITHUB_REPOSITORY;
+  const prNumber = numberOption(options.prNumber);
+  const pullRequestHeadSha = options.headSha ?? options.pullRequestHeadSha;
+  const skipReason = options.skipReason;
+  const leaf = packageLeaf(context.manifest.name);
+  const mirrorPackageName = `@${namespace}/${leaf}`;
+  const preview = {
+    mode,
+    sourceRepository: sourceRepository ?? null,
+    sourceSha: sourceSha ?? null,
+    pullRequestNumber: mode === "pr" ? prNumber : null,
+    pullRequestHeadSha: mode === "pr" ? pullRequestHeadSha ?? null : null,
+    mirrorNamespace: namespace,
+    mirrorPackageName,
+    version: null,
+    distTag: null,
+    packageSpec: null
+  };
+  const result = {
+    schemaVersion: 1,
+    package: {
+      name: context.manifest.name,
+      version: context.manifest.version,
+      packagePath: relativePath(cwd, context.packageDir)
+    },
+    preview,
+    skip: {
+      shouldSkip: Boolean(skipReason),
+      reason: skipReason ?? null
+    },
+    install: null
+  };
+  if (skipReason) return result;
+  if (mode === "main") {
+    if (!sourceSha) throw new Error("Main preview planning needs --source-sha or GITHUB_SHA.");
+    preview.version = `0.0.0-main.sha.${sourceSha}`;
+    preview.distTag = "main";
+  } else {
+    if (!Number.isInteger(prNumber) || prNumber <= 0 || !pullRequestHeadSha) {
+      throw new Error("PR preview planning needs --pr-number and --head-sha.");
+    }
+    preview.version = `0.0.0-pr.${prNumber}.sha.${pullRequestHeadSha}`;
+    preview.distTag = `pr-${prNumber}`;
+  }
+  preview.packageSpec = `${mirrorPackageName}@${preview.version}`;
+  result.install = previewInstall(context.manifest.name, mirrorPackageName, preview.distTag, pullRequestHeadSha ?? sourceSha, mode === "pr" && options.comment !== false);
+  return result;
+}
+
+function previewInstall(sourceName, mirrorName, distTag, sourceSha, shouldComment) {
+  const target = mirrorName === sourceName ? `${mirrorName}@${distTag}` : `${sourceName}@npm:${mirrorName}@${distTag}`;
+  const command = `pnpm add ${target}`;
+  const commentMarker = "async-actions-package-preview";
+  const commentBody = shouldComment
+    ? [
+        "### Preview package",
+        "",
+        `Preview for PR head \`${sourceSha}\`, published as \`${mirrorName}\`.`,
+        "",
+        "```sh",
+        command,
+        "```"
+      ].join("\n")
+    : "";
+  return {
+    target,
+    command,
+    commentMarker,
+    commentBody
+  };
+}
+
+function previewManifest(manifest, plan, registry) {
+  const staged = {
+    ...manifest,
+    name: plan.preview.mirrorPackageName,
+    version: plan.preview.version,
+    publishConfig: { registry: registry ?? "https://npm.pkg.github.com" }
+  };
+  delete staged.scripts;
+  delete staged.devDependencies;
+  return staged;
+}
+
+async function copyPackFiles(packageDir, stageDir, files) {
+  for (const file of files) {
+    if (file === "package.json") continue;
+    const source = resolveInside(packageDir, file);
+    if (!existsSync(source)) continue;
+    const target = resolveInside(stageDir, file);
+    await mkdir(dirname(target), { recursive: true });
+    await cp(source, target, { recursive: true });
+  }
+}
+
+function verifyPreviewNpm(plan, addCheck, registry = "https://npm.pkg.github.com") {
+  const versionResult = spawnSync("npm", ["view", plan.preview.packageSpec, "version", "--registry", registry], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (versionResult.status === 0 && versionResult.stdout.trim() === plan.preview.version) {
+    addCheck("preview-version", "pass", { spec: plan.preview.packageSpec });
+  } else {
+    addCheck("preview-version", "fail", { spec: plan.preview.packageSpec, output: (versionResult.stderr || versionResult.stdout).slice(0, 500) });
+  }
+
+  const tagResult = spawnSync("npm", ["view", plan.preview.mirrorPackageName, `dist-tags.${plan.preview.distTag}`, "--registry", registry], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (tagResult.status === 0 && tagResult.stdout.trim() === plan.preview.version) {
+    addCheck("preview-dist-tag", "pass", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, version: plan.preview.version });
+  } else {
+    addCheck("preview-dist-tag", "fail", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, output: (tagResult.stderr || tagResult.stdout).slice(0, 500) });
+  }
+}
+
+function normalizeNamespace(namespace) {
+  if (typeof namespace !== "string") return "";
+  return namespace.trim().replace(/^@/u, "").toLowerCase();
+}
+
+function packageLeaf(name) {
+  return name.startsWith("@") ? name.split("/")[1] : name;
+}
+
+function numberOption(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = Number(value);
+  return Number.isInteger(number) ? number : undefined;
 }
 
 async function readChangelogReleaseNotes(cwd) {
