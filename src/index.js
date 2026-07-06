@@ -653,11 +653,12 @@ async function verifyPreviewNpm(plan, addCheck, registry = "https://npm.pkg.gith
       addCheck("preview-version", "fail", { spec: plan.preview.packageSpec, output: npmOutput(versionResult) });
     }
 
-    const tagResult = npmViewWithRetry([plan.preview.mirrorPackageName, `dist-tags.${plan.preview.distTag}`], plan.preview.version, registry, auth.env);
+    const distTagSpec = `${plan.preview.mirrorPackageName}@${plan.preview.distTag}`;
+    const tagResult = npmViewWithRetry([distTagSpec, "version"], plan.preview.version, registry, auth.env);
     if (tagResult.status === 0 && tagResult.stdout.trim() === plan.preview.version) {
-      addCheck("preview-dist-tag", "pass", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, version: plan.preview.version });
+      addCheck("preview-dist-tag", "pass", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, spec: distTagSpec, version: plan.preview.version });
     } else {
-      addCheck("preview-dist-tag", "fail", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, output: npmOutput(tagResult) });
+      addCheck("preview-dist-tag", "fail", { package: plan.preview.mirrorPackageName, distTag: plan.preview.distTag, spec: distTagSpec, output: npmOutput(tagResult) });
     }
   } finally {
     await auth.cleanup();

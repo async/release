@@ -270,7 +270,7 @@ test("preview doctor live mode verifies immutable version and dist-tag with npm 
     const calls = readFileSync(callsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls.map((call) => call.args.slice(0, 3)), [
       ["view", "@async/example@0.0.0-pr.12.sha.abc123", "version"],
-      ["view", "@async/example", "dist-tags.pr-12"]
+      ["view", "@async/example@pr-12", "version"]
     ]);
   } finally {
     process.env.PATH = originalPath;
@@ -543,8 +543,6 @@ const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ args, userconfig: process.env.NPM_CONFIG_USERCONFIG || "", nodeAuthToken: process.env.NODE_AUTH_TOKEN || "" }) + "\\n");
 
 if (args[0] === "view" && args[2] === "version") {
-  process.stdout.write(${JSON.stringify(version)} + "\\n");
-} else if (args[0] === "view" && args[2] === "dist-tags.pr-12") {
   process.stdout.write(${JSON.stringify(version)} + "\\n");
 } else {
   process.stderr.write("unexpected npm args: " + args.join(" ") + "\\n");

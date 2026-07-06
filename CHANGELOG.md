@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 - 2026-07-06
+
+### Fixed
+
+- Verify preview dist-tags by resolving `<package>@<dist-tag>` to its version,
+  avoiding nested dist-tag field reads that can fail against GitHub Packages.
+
 ## 0.1.5 - 2026-06-19
 
 ### Fixed
